@@ -40,7 +40,7 @@ trait AhaLogDirectives extends BasicDirectives with MiscDirectives {
             }
           case rslt @ Rejected(rejections) =>
             val reason = rejections.map(_.getClass.getName).mkString(",")
-            mkString(reason, "-")
+            log.info(mkString(reason, "-"))
             Future.successful(rslt)
         }
       }
