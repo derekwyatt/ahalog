@@ -44,24 +44,28 @@ class AhaLogDirectivesSpec extends FlatSpec with Matchers with AhaLogDirectives 
 
   "AhaLogDirectives" should "log properly with a X-Real-Ip" in {
     Get() ~> `X-Real-Ip`(remoteAddr) ~> route ~> check {
+      entityAs[String] shouldBe "the length of this is 24"
       logger.lastLog should fullyMatch regex (myaddr + """ - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24""")
     }
   }
 
   it should "log properly with an X-Forwarded-For" in {
     Get() ~> `X-Forwarded-For`(remoteAddr) ~> route ~> check {
+      entityAs[String] shouldBe "the length of this is 24"
       logger.lastLog should fullyMatch regex (myaddr + """ - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24""")
     }
   }
 
   it should "log properly with a Remote-Address" in {
     Get() ~> `Remote-Address`(remoteAddr) ~> route ~> check {
+      entityAs[String] shouldBe "the length of this is 24"
       logger.lastLog should fullyMatch regex (myaddr + """ - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24""")
     }
   }
 
   it should "log properly no address at all" in {
     Get() ~> route ~> check {
+      entityAs[String] shouldBe "the length of this is 24"
       logger.lastLog should fullyMatch regex """- - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24"""
     }
   }

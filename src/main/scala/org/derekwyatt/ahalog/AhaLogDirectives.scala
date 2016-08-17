@@ -6,8 +6,12 @@ import akka.http.scaladsl.model.headers._
 import akka.http.scaladsl.server._
 import akka.http.scaladsl.server.directives._
 import akka.http.scaladsl.server.RouteResult.{ Complete, Rejected }
+import akka.NotUsed
 import akka.stream.Materializer
-import akka.util.Timeout
+import akka.stream.scaladsl.Flow
+import akka.stream.stage.{ InHandler, GraphStage, GraphStageLogic, OutHandler }
+import akka.stream.{ Attributes, Inlet, FlowShape, Outlet }
+import akka.util.{ ByteString, Timeout }
 import scala.concurrent.{ ExecutionContext, Future }
 
 trait AhaLogDirectives extends BasicDirectives with MiscDirectives {
@@ -31,18 +35,72 @@ trait AhaLogDirectives extends BasicDirectives with MiscDirectives {
 
         def mkString(code: String, size: String): String = s"""$remoteIp - - [$now] "$method $path $proto" $code $size"""
 
-        originalRoute(ctx).flatMap {
-          case rslt @ Complete(rsp) =>
+        originalRoute(ctx).map {
+          case Complete(rsp) =>
             val code = rsp.status.intValue.toString
-            rsp.entity.toStrict(to.duration).map(_.contentLength).map { size =>
-              log.info(mkString(code, size.toString))
-              rslt
-            }
+            Complete(
+              rsp.mapEntity { entity =>
+                entity.transformDataBytes(
+                  SideEffector.flow[ByteString, Long](
+                    size => log.info(mkString(code, size.toString)),
+                    ex => log.error(mkString(code, ex.getMessage()))
+                  )(0L)((acc, bs) => acc + bs.size)
+                )
+              }
+            )
           case rslt @ Rejected(rejections) =>
             val reason = rejections.map(_.getClass.getName).mkString(",")
             log.info(mkString(reason, "-"))
-            Future.successful(rslt)
+            rslt
         }
       }
   }
+}
+
+class SideEffector[A, B](onComplete: B => Unit, onFailure: Throwable => Unit, zero: B, acc: (B, A) => B) extends GraphStage[FlowShape[A, A]] {
+
+  val in = Inlet[A]("SideEffector.in")
+  val out = Outlet[A]("SideEffector.out")
+
+  override val shape = FlowShape.of(in, out)
+
+  override def createLogic(attr: Attributes): GraphStageLogic =
+    new GraphStageLogic(shape) {
+      var accData = zero
+      var called = false
+
+      setHandler(in, new InHandler {
+        override def onPush(): Unit = {
+          val data = grab(in)
+          accData = acc(accData, data)
+          push(out, data)
+        }
+
+        override def onUpstreamFinish(): Unit = {
+          called = true
+          onComplete(accData)
+          super.onUpstreamFinish()
+        }
+
+        override def onUpstreamFailure(ex: Throwable): Unit = {
+          onFailure(ex)
+          super.onUpstreamFailure(ex)
+        }
+      })
+
+      setHandler(out, new OutHandler {
+        override def onPull(): Unit = pull(in)
+
+        override def onDownstreamFinish(): Unit = {
+          called = true
+          onComplete(accData)
+          super.onDownstreamFinish()
+        }
+      })
+    }
+}
+
+object SideEffector {
+  def flow[A, B](onComplete: B => Unit, onFailure: Throwable => Unit = _ => ())(zero: B)(acc: (B, A) => B): Flow[A, A, NotUsed] =
+    Flow.fromGraph(new SideEffector(onComplete, onFailure, zero, acc))
 }
