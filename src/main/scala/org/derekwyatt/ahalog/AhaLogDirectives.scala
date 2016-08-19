@@ -33,10 +33,15 @@ trait AhaLogDirectives extends BasicDirectives with MiscDirectives {
         }
         def proto = ctx.request.protocol.value
 
-        def mkString(code: String, size: String): String = s"""$remoteIp - - [$now] "$method $path $proto" $code $size"""
+        def username: String = ctx.request.header[Authorization].flatMap(auth => auth.credentials match {
+          case BasicHttpCredentials(username, _) => Some(username)
+          case _ => None
+        }).getOrElse("-")
+
+        def mkString(code: String, size: String): String = s"""$remoteIp - $username [$now] "$method $path $proto" $code $size"""
 
         originalRoute(ctx).map {
-          case Complete(rsp) =>
+          case Complete(rsp) if rsp.status.allowsEntity =>
             val code = rsp.status.intValue.toString
             Complete(
               rsp.mapEntity { entity =>
@@ -48,6 +53,9 @@ trait AhaLogDirectives extends BasicDirectives with MiscDirectives {
                 )
               }
             )
+          case rslt @ Complete(rsp) =>
+            log.info(mkString(rsp.status.intValue.toString, "-"))
+            rslt
           case rslt @ Rejected(rejections) =>
             val reason = rejections.map(_.getClass.getName).mkString(",")
             log.info(mkString(reason, "-"))

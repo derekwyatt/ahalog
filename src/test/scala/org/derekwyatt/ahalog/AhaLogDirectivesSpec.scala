@@ -4,6 +4,7 @@ import akka.actor.ActorSystem
 import akka.event.LoggingAdapter
 import akka.http.scaladsl.model.headers._
 import akka.http.scaladsl.model.RemoteAddress
+import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.server.{ Directives, Route }
 import akka.http.scaladsl.testkit.ScalatestRouteTest
 import akka.stream.{ ActorMaterializer, Materializer }
@@ -39,34 +40,57 @@ class AhaLogDirectivesSpec extends FlatSpec with Matchers with AhaLogDirectives 
   val remoteAddr = RemoteAddress(InetAddress.getLocalHost())
 
   def route: Route = accessLog(logger)(system.dispatcher, to, mat) {
-    complete("the length of this is 24")
+    get {
+      path("something") {
+        complete("the length of this is 24")
+      } ~
+      path("nothing") {
+        complete(NoContent)
+      }
+    }
   }
 
+  val somethingRE = """ - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/something HTTP/1.1" 200 24"""
+  val shortNothingRE = """ \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/nothing HTTP/1.1" 204 -"""
+  val nothingRE = " - -" + shortNothingRE
+
   "AhaLogDirectives" should "log properly with a X-Real-Ip" in {
-    Get() ~> `X-Real-Ip`(remoteAddr) ~> route ~> check {
+    Get("/something") ~> `X-Real-Ip`(remoteAddr) ~> route ~> check {
       entityAs[String] shouldBe "the length of this is 24"
-      logger.lastLog should fullyMatch regex (myaddr + """ - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24""")
+      logger.lastLog should fullyMatch regex (myaddr + somethingRE)
     }
   }
 
   it should "log properly with an X-Forwarded-For" in {
-    Get() ~> `X-Forwarded-For`(remoteAddr) ~> route ~> check {
+    Get("/something") ~> `X-Forwarded-For`(remoteAddr) ~> route ~> check {
       entityAs[String] shouldBe "the length of this is 24"
-      logger.lastLog should fullyMatch regex (myaddr + """ - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24""")
+      logger.lastLog should fullyMatch regex (myaddr + somethingRE)
     }
   }
 
   it should "log properly with a Remote-Address" in {
-    Get() ~> `Remote-Address`(remoteAddr) ~> route ~> check {
+    Get("/something") ~> `Remote-Address`(remoteAddr) ~> route ~> check {
       entityAs[String] shouldBe "the length of this is 24"
-      logger.lastLog should fullyMatch regex (myaddr + """ - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24""")
+      logger.lastLog should fullyMatch regex (myaddr + somethingRE)
     }
   }
 
   it should "log properly no address at all" in {
-    Get() ~> route ~> check {
+    Get("/something") ~> route ~> check {
       entityAs[String] shouldBe "the length of this is 24"
-      logger.lastLog should fullyMatch regex """- - - \[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} -0000\] "GET http://example.com/ HTTP/1.1" 200 24"""
+      logger.lastLog should fullyMatch regex ("-" + somethingRE)
+    }
+  }
+
+  it should "log properly when there's no content" in {
+    Get("/nothing") ~> route ~> check {
+      logger.lastLog should fullyMatch regex ("-" + nothingRE)
+    }
+  }
+
+  it should "log properly the username" in {
+    Get("/nothing") ~> Authorization(BasicHttpCredentials("TheBigBadWolf", "KicksAss")) ~>route ~> check {
+      logger.lastLog should fullyMatch regex (s"- - TheBigBadWolf" + shortNothingRE)
     }
   }
 }
