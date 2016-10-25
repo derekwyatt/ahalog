@@ -15,53 +15,67 @@ import akka.util.{ ByteString, Timeout }
 import scala.concurrent.{ ExecutionContext, Future }
 
 trait AhaLogDirectives extends BasicDirectives with MiscDirectives {
+  /**
+   * A directive that will log to the given logger in a format that resembles the apache access log.
+   *
+   * @param log The Logger instance to which we want to log INFO level messages.
+   */
   def accessLog(log: LoggingAdapter)(implicit ec: ExecutionContext, to: Timeout, mat: Materializer): Directive0 =
-    mapInnerRoute { originalRoute =>
-      ctx => {
-        def fromForwarded = ctx.request.header[`X-Forwarded-For`].flatMap(h => h.addresses.headOption)
-        def fromRemoteAddress = ctx.request.header[`Remote-Address`].map(_.address)
-        def fromRealIp = ctx.request.header[`X-Real-Ip`].map(_.address)
+    mapInnerRoute { originalRoute => ctx => {
+      // Extract intersting inforamtion from the request
+      def fromForwarded = ctx.request.header[`X-Forwarded-For`].flatMap(h => h.addresses.headOption)
+      def fromRemoteAddress = ctx.request.header[`Remote-Address`].map(_.address)
+      def fromRealIp = ctx.request.header[`X-Real-Ip`].map(_.address)
 
-        def remoteAddress = fromForwarded orElse fromRemoteAddress orElse fromRealIp
-        def remoteIp = remoteAddress.flatMap(ra => ra.toOption.map(_.getHostAddress)).getOrElse("-")
+      def remoteAddress = fromForwarded orElse fromRemoteAddress orElse fromRealIp
+      def remoteIp = remoteAddress.flatMap(ra => ra.toOption.map(_.getHostAddress)).getOrElse("-")
 
-        def method = ctx.request.method.value
-        def path = ctx.request.uri.toString
-        def now = {
-          val n = DateTime.now
-          f"${n.day}%02d/${n.monthStr}/${n.year}:${n.hour}%02d:${n.minute}%02d:${n.second}%02d -0000"
-        }
-        def proto = ctx.request.protocol.value
-
-        def username: String = ctx.request.header[Authorization].flatMap(auth => auth.credentials match {
-          case BasicHttpCredentials(username, _) => Some(username)
-          case _ => None
-        }).getOrElse("-")
-
-        def mkString(code: String, size: String): String = s"""$remoteIp - $username [$now] "$method $path $proto" $code $size"""
-
-        originalRoute(ctx).map {
-          case Complete(rsp) if rsp.status.allowsEntity =>
-            val code = rsp.status.intValue.toString
-            Complete(
-              rsp.mapEntity { entity =>
-                entity.transformDataBytes(
-                  SideEffector.flow[ByteString, Long](
-                    size => log.info(mkString(code, size.toString)),
-                    ex => log.error(mkString(code, ex.getMessage()))
-                  )(0L)((acc, bs) => acc + bs.size)
-                )
-              }
-            )
-          case rslt @ Complete(rsp) =>
-            log.info(mkString(rsp.status.intValue.toString, "-"))
-            rslt
-          case rslt @ Rejected(rejections) =>
-            val reason = rejections.map(_.getClass.getName).mkString(",")
-            log.info(mkString(reason, "-"))
-            rslt
-        }
+      def method = ctx.request.method.value
+      def path = ctx.request.uri.toString
+      def now = {
+        val n = DateTime.now
+        f"${n.day}%02d/${n.monthStr}/${n.year}:${n.hour}%02d:${n.minute}%02d:${n.second}%02d -0000"
       }
+      def proto = ctx.request.protocol.value
+
+      def username: String = ctx.request.header[Authorization].flatMap(auth => auth.credentials match {
+        case BasicHttpCredentials(username, _) => Some(username)
+        case _ => None
+      }).getOrElse("-")
+
+      def mkString(code: String, size: String): String = s"""$remoteIp - $username [$now] "$method $path $proto" $code $size"""
+
+      // Execute the original function that we're wrapping
+      originalRoute(ctx).map {
+        // We have a valid HTTPResponse.  In order to finish the log, we need to get the size of the
+        // body.  However, the body is an Akka stream and may not even be in memory - it could still
+        // be on the wire - and so we need to inject some code into the stream in order to lazily
+        // compute the size that was marshalled.
+        case Complete(rsp) if rsp.status.allowsEntity =>
+          val code = rsp.status.intValue.toString
+          // Transform the response by modifying the response entity with a newly injected stream
+          // element
+          Complete(
+            rsp.mapEntity { entity =>
+              entity.transformDataBytes(
+                // The SideEffector will allow us to accumulate the size of the byte strings passing
+                // through until it eventually results in a completion that we can log
+                SideEffector.flow[ByteString, Long](
+                  size => log.info(mkString(code, size.toString)),
+                  ex => log.error(mkString(code, ex.getMessage()))
+                )(0L)((acc, bs) => acc + bs.size)
+              )
+            }
+          )
+        case rslt @ Complete(rsp) =>
+          log.info(mkString(rsp.status.intValue.toString, "-"))
+          rslt
+        case rslt @ Rejected(rejections) =>
+          val reason = rejections.map(_.getClass.getName).mkString(",")
+          log.info(mkString(reason, "-"))
+          rslt
+      }
+    }
   }
 }
 
